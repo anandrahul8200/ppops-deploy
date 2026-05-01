@@ -1,0 +1,38 @@
+name: 'Kiro PR Code Review'
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+
+jobs:
+  kiro-review:
+    name: 'Kiro AI Code Review'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Kiro CLI
+        run: curl -fsSL https://cli.kiro.dev/install | bash
+
+      - name: Get changed files
+        id: changes
+        run: |
+          FILES=$(git diff --name-only origin/main...HEAD -- '*.cs' '*.csproj' '*.json' | head -20)
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+          echo "Changed files:"
+          echo "$FILES"
+
+      - name: Run Kiro code review
+        if: steps.changes.outputs.files != ''
+        env:
+          KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
+        run: |
+          DIFF=$(git diff origin/main...HEAD -- '*.cs' '*.csproj' '*.json')
+          echo "$DIFF" | kiro-cli chat \
+            --agent code-reviewer \
+            --no-interactive \
+            --trust-tools=read,grep,glob,code \
+            "Review the following code changes for this pull request. Focus on bugs, security issues, performance, and .NET best practices. Provide a summary with severity levels (critical/warning/suggestion)."
