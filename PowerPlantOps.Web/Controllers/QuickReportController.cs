@@ -7,6 +7,9 @@ using Microsoft.EntityFrameworkCore;
 
 namespace PowerPlantOps.Web.Controllers
 {
+    /// <summary>
+    /// Quick reporting endpoints for plant operational data.
+    /// </summary>
     [Route("api/reports")]
     [ApiController]
     public class QuickReportController : ControllerBase
