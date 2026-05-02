@@ -29,34 +29,45 @@ jobs:
           echo "Changed files:"
           echo "$FILES"
 
+      - name: Save diff to file
+        if: steps.changes.outputs.files != ''
+        run: |
+          git diff origin/main...HEAD -- '*.cs' '*.csproj' '*.json' > /tmp/pr-diff.txt
+          echo "Diff size: $(wc -c < /tmp/pr-diff.txt) bytes"
+          cat /tmp/pr-diff.txt
+
       - name: Run Kiro code review
         if: steps.changes.outputs.files != ''
         id: review
         env:
           KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
         run: |
-          DIFF=$(git diff origin/main...HEAD -- '*.cs' '*.csproj' '*.json')
-          REVIEW=$(echo "$DIFF" | kiro-cli chat \
-            --agent code-reviewer \
+          DIFF_CONTENT=$(cat /tmp/pr-diff.txt)
+          REVIEW=$(kiro-cli chat \
             --no-interactive \
             --trust-tools=read,grep,glob,code \
-            "Review the following code changes for this pull request. Focus on bugs, security issues, performance, and .NET best practices. Provide a summary with severity levels (critical/warning/suggestion)." 2>&1)
+            "You are a senior .NET/C# code reviewer. Review the following code diff for bugs, security vulnerabilities, performance issues, and best practices. Categorize findings by severity (critical/warning/suggestion). Here is the diff:
+
+          $DIFF_CONTENT" 2>&1)
           echo "$REVIEW"
-          echo "review<<EOF" >> $GITHUB_OUTPUT
-          echo "$REVIEW" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          {
+            echo "review<<ENDOFREVIEW"
+            echo "$REVIEW"
+            echo "ENDOFREVIEW"
+          } >> $GITHUB_OUTPUT
 
       - name: Post review as PR comment
         if: steps.review.outputs.review != ''
         uses: actions/github-script@v7
         with:
           script: |
-            const review = `## 🤖 Kiro AI Code Review\n\n${process.env.REVIEW_OUTPUT}`;
-            github.rest.issues.createComment({
+            const review = process.env.REVIEW_OUTPUT;
+            const body = `## 🤖 Kiro AI Code Review\n\n${review}`;
+            await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: review
+              body: body
             });
           github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
