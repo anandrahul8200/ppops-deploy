@@ -45,13 +45,36 @@ jobs:
           REVIEW=$(kiro-cli chat \
             --no-interactive \
             --trust-tools=read,grep,glob,code \
-            "You are a senior .NET/C# code reviewer. Review the following code diff for bugs, security vulnerabilities, performance issues, and best practices. Categorize findings by severity (critical/warning/suggestion). At the very end of your review, output exactly one of these lines: RESULT:PASS or RESULT:FAIL. Use RESULT:FAIL if there are any critical findings. Use RESULT:PASS if there are only warnings or suggestions. Here is the diff:
+            "You are a senior .NET/C# code reviewer reviewing a pull request. Analyze the following code diff thoroughly.
+
+          OUTPUT FORMAT RULES (STRICT - follow exactly):
+          - Output ONLY plain text and GitHub-flavored markdown. NO ANSI escape codes, NO terminal colors, NO special characters.
+          - Use markdown code blocks with \`\`\`csharp for code snippets.
+          - Use markdown headers (##, ###) for sections.
+          - Use markdown tables for the summary.
+
+          For EACH finding, provide ALL of the following:
+          1. Severity badge: use 🔴 for Critical, 🟡 for Warning, 🟢 for Suggestion
+          2. Title with file name and line number(s)
+          3. PROBLEMATIC CODE: Show the exact bad code in a csharp code block
+          4. EXPLANATION: Why this is a problem (security risk, crash scenario, performance impact)
+          5. FIXED CODE: Show the corrected code in a csharp code block
+          6. STEPS TO FIX: Numbered steps the developer should take
+
+          At the end, include:
+          - A markdown summary table with columns: Severity, Count, Key Issues
+          - A final verdict line: either RESULT:PASS (no critical issues) or RESULT:FAIL (has critical issues)
+
+          Here is the diff to review:
 
           $DIFF_CONTENT" 2>&1)
-          echo "$REVIEW"
+
+          # Strip ANSI escape codes from output
+          CLEAN_REVIEW=$(echo "$REVIEW" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | sed 's/\x1b\[?[0-9]*[a-zA-Z]//g' | sed 's/\x1b\[[0-9]*[A-Z]//g')
+          echo "$CLEAN_REVIEW"
           {
             echo "review<<ENDOFREVIEW"
-            echo "$REVIEW"
+            echo "$CLEAN_REVIEW"
             echo "ENDOFREVIEW"
           } >> $GITHUB_OUTPUT
 
@@ -75,13 +98,39 @@ jobs:
       - name: Fail if critical issues found
         if: steps.review.outputs.review != ''
         run: |
-          REVIEW="${{ steps.review.outputs.review }}"
+          REVIEW='${{ steps.review.outputs.review }}'
           if echo "$REVIEW" | grep -qi "RESULT:FAIL"; then
-            echo "❌ Kiro found critical issues. PR cannot be merged until they are resolved."
+            echo ""
+            echo "============================================"
+            echo "❌ KIRO CODE REVIEW: FAILED"
+            echo "============================================"
+            echo ""
+            echo "Critical issues were found in this PR."
+            echo "Please review the Kiro AI Code Review comment"
+            echo "on the PR for detailed findings, problematic"
+            echo "code sections, and fix instructions."
+            echo ""
+            echo "PR cannot be merged until critical issues"
+            echo "are resolved."
+            echo "============================================"
             exit 1
           elif echo "$REVIEW" | grep -qi "critical"; then
-            echo "❌ Kiro found critical issues. PR cannot be merged until they are resolved."
+            echo ""
+            echo "============================================"
+            echo "❌ KIRO CODE REVIEW: FAILED"
+            echo "============================================"
+            echo ""
+            echo "Critical issues were found in this PR."
+            echo "See the PR comment for details and fixes."
+            echo "============================================"
             exit 1
           else
-            echo "✅ No critical issues found. PR is safe to merge."
+            echo ""
+            echo "============================================"
+            echo "✅ KIRO CODE REVIEW: PASSED"
+            echo "============================================"
+            echo ""
+            echo "No critical issues found."
+            echo "Warnings and suggestions are in the PR comment."
+            echo "============================================"
           fi
