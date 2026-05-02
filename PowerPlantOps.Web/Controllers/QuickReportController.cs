@@ -21,7 +21,7 @@ namespace PowerPlantOps.Web.Controllers
 
         /// <summary>
         /// GET /api/reports/plant-summary?plantName=Riverside
-        /// Quick plant summary report
+        /// Quick plant summary report - returns health metrics for a given plant
         /// </summary>
         [HttpGet("plant-summary")]
         public async Task<IActionResult> GetPlantSummary([FromQuery] string plantName)
