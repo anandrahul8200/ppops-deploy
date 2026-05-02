@@ -35,17 +35,64 @@ jobs:
           git diff origin/main...HEAD -- '*.cs' '*.csproj' '*.json' > /tmp/pr-diff.txt
           echo "Diff size: $(wc -c < /tmp/pr-diff.txt) bytes"
 
+      # Feature 1: Find existing Kiro review comment (for update instead of duplicate)
+      - name: Find existing review comment
+        if: steps.changes.outputs.files != ''
+        id: find_comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const kiroComment = comments.data.find(c =>
+              c.user.login === 'github-actions[bot]' &&
+              c.body.includes('Kiro AI Code Review')
+            );
+            if (kiroComment) {
+              core.setOutput('comment_id', kiroComment.id);
+              core.setOutput('previous_review', kiroComment.body);
+              console.log(`Found existing review comment: ${kiroComment.id}`);
+            } else {
+              core.setOutput('comment_id', '');
+              core.setOutput('previous_review', '');
+              console.log('No existing review comment found');
+            }
+
+      # Feature 2: Run Kiro review with previous findings context
       - name: Run Kiro code review
         if: steps.changes.outputs.files != ''
         id: review
         env:
           KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
+          PREVIOUS_REVIEW: ${{ steps.find_comment.outputs.previous_review }}
         run: |
           DIFF_CONTENT=$(cat /tmp/pr-diff.txt)
+
+          # Build context from previous review if it exists
+          PREVIOUS_CONTEXT=""
+          if [ -n "$PREVIOUS_REVIEW" ]; then
+            PREVIOUS_CONTEXT="IMPORTANT - PREVIOUS REVIEW CONTEXT:
+          This PR was reviewed before. Here are the previous findings:
+          ---
+          $PREVIOUS_REVIEW
+          ---
+          Compare the current code with the previous findings. For each previous finding:
+          - If FIXED: mark it as ✅ FIXED with a brief note
+          - If STILL PRESENT: mark it as ❌ STILL PRESENT
+          - If PARTIALLY FIXED: mark it as ⚠️ PARTIALLY FIXED with details
+          Also flag any NEW issues not in the previous review.
+          Start your review with a '## 📊 Fix Status' section showing the status of each previous finding BEFORE the detailed review."
+          fi
+
           REVIEW=$(kiro-cli chat \
             --no-interactive \
             --trust-tools=read,grep,glob,code \
             "You are a senior .NET/C# code reviewer reviewing a pull request. Analyze the following code diff thoroughly.
+
+          $PREVIOUS_CONTEXT
 
           OUTPUT FORMAT RULES (STRICT - follow exactly):
           - Output ONLY plain text and GitHub-flavored markdown. NO ANSI escape codes, NO terminal colors, NO special characters.
@@ -69,7 +116,7 @@ jobs:
 
           $DIFF_CONTENT" 2>&1)
 
-          # Strip ANSI escape codes from output
+          # Strip ANSI escape codes
           CLEAN_REVIEW=$(echo "$REVIEW" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | sed 's/\x1b\[?[0-9]*[a-zA-Z]//g' | sed 's/\x1b\[[0-9]*[A-Z]//g')
           echo "$CLEAN_REVIEW"
           {
@@ -78,23 +125,81 @@ jobs:
             echo "ENDOFREVIEW"
           } >> $GITHUB_OUTPUT
 
-      - name: Post review as PR comment
+      # Feature 1: Update existing comment OR create new one (no duplicates)
+      - name: Post or update review comment
         if: steps.review.outputs.review != ''
         uses: actions/github-script@v7
         with:
           script: |
             const review = process.env.REVIEW_OUTPUT;
-            const body = `## 🤖 Kiro AI Code Review\n\n${review}`;
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: body
-            });
+            const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+            const attempt = process.env.COMMENT_ID ? '(Updated)' : '(Initial Review)';
+            const body = `## 🤖 Kiro AI Code Review ${attempt}\n_Last reviewed: ${timestamp}_\n\n${review}`;
+
+            if (process.env.COMMENT_ID) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: parseInt(process.env.COMMENT_ID),
+                body: body
+              });
+              console.log(`Updated existing comment ${process.env.COMMENT_ID}`);
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body
+              });
+              console.log('Created new review comment');
+            }
           github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
           REVIEW_OUTPUT: ${{ steps.review.outputs.review }}
+          COMMENT_ID: ${{ steps.find_comment.outputs.comment_id }}
 
+      # Feature 3: Save review to S3 for trend tracking
+      - name: Save review to S3
+        if: steps.review.outputs.review != ''
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H-%M-%S)
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          REPO_NAME=${{ github.event.repository.name }}
+          AUTHOR=${{ github.event.pull_request.user.login }}
+          REVIEW='${{ steps.review.outputs.review }}'
+
+          # Count findings
+          CRITICAL_COUNT=$(echo "$REVIEW" | grep -ci "🔴\|critical" || echo "0")
+          WARNING_COUNT=$(echo "$REVIEW" | grep -ci "🟡\|warning" || echo "0")
+          SUGGESTION_COUNT=$(echo "$REVIEW" | grep -ci "🟢\|suggestion" || echo "0")
+          RESULT=$(echo "$REVIEW" | grep -oi "RESULT:[A-Z]*" | tail -1 || echo "UNKNOWN")
+
+          # Create JSON metadata
+          cat > /tmp/review-meta.json << METAEOF
+          {
+            "timestamp": "$TIMESTAMP",
+            "repo": "$REPO_NAME",
+            "pr_number": $PR_NUMBER,
+            "author": "$AUTHOR",
+            "commit_sha": "${{ github.event.pull_request.head.sha }}",
+            "critical_count": $CRITICAL_COUNT,
+            "warning_count": $WARNING_COUNT,
+            "suggestion_count": $SUGGESTION_COUNT,
+            "result": "$RESULT"
+          }
+          METAEOF
+
+          # Upload review and metadata to S3
+          echo "$REVIEW" > /tmp/review-content.md
+          aws s3 cp /tmp/review-content.md "s3://ppops-code-reviews-284333427150/${REPO_NAME}/pr-${PR_NUMBER}/${TIMESTAMP}-review.md" || true
+          aws s3 cp /tmp/review-meta.json "s3://ppops-code-reviews-284333427150/${REPO_NAME}/pr-${PR_NUMBER}/${TIMESTAMP}-meta.json" || true
+          echo "Review saved to S3: ${REPO_NAME}/pr-${PR_NUMBER}/${TIMESTAMP}"
+
+      # Fail if critical issues found
       - name: Fail if critical issues found
         if: steps.review.outputs.review != ''
         run: |
@@ -134,3 +239,35 @@ jobs:
             echo "Warnings and suggestions are in the PR comment."
             echo "============================================"
           fi
+
+  # Feature 4: Weekly trend report (runs on schedule)
+  trend-report:
+    name: 'Weekly Trend Report'
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Kiro CLI
+        run: curl -fsSL https://cli.kiro.dev/install | bash
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Download recent reviews
+        run: |
+          mkdir -p /tmp/reviews
+          aws s3 sync "s3://ppops-code-reviews-284333427150/${{ github.event.repository.name }}/" /tmp/reviews/ --exclude "*" --include "*-meta.json" || true
+          echo "Downloaded $(ls /tmp/reviews/*-meta.json 2>/dev/null | wc -l) review metadata files"
+
+      - name: Generate trend report
+        env:
+          KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
+        run: |
+          # Combine all metadata
+          METADATA=$(cat /tmp/reviews/*-meta.json 2>/dev/null || echo "No reviews found")
+          kiro-cli chat \
+            --no-interactive \
+            "Analyze these code review metadata records and generate a trend report in GitHub markdown. Show: total reviews, pass/fail ratio, most common issue types, trends over time, and recommendations. Data: $METADATA"
