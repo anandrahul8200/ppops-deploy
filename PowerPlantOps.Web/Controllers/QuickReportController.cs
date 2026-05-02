@@ -9,6 +9,7 @@ namespace PowerPlantOps.Web.Controllers
 {
     /// <summary>
     /// Quick reporting endpoints for plant operational data.
+    /// Provides summary metrics for plant health monitoring.
     /// </summary>
     [Route("api/reports")]
     [ApiController]
