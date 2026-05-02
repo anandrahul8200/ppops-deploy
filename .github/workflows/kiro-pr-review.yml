@@ -34,7 +34,6 @@ jobs:
         run: |
           git diff origin/main...HEAD -- '*.cs' '*.csproj' '*.json' > /tmp/pr-diff.txt
           echo "Diff size: $(wc -c < /tmp/pr-diff.txt) bytes"
-          cat /tmp/pr-diff.txt
 
       - name: Run Kiro code review
         if: steps.changes.outputs.files != ''
@@ -46,7 +45,7 @@ jobs:
           REVIEW=$(kiro-cli chat \
             --no-interactive \
             --trust-tools=read,grep,glob,code \
-            "You are a senior .NET/C# code reviewer. Review the following code diff for bugs, security vulnerabilities, performance issues, and best practices. Categorize findings by severity (critical/warning/suggestion). Here is the diff:
+            "You are a senior .NET/C# code reviewer. Review the following code diff for bugs, security vulnerabilities, performance issues, and best practices. Categorize findings by severity (critical/warning/suggestion). At the very end of your review, output exactly one of these lines: RESULT:PASS or RESULT:FAIL. Use RESULT:FAIL if there are any critical findings. Use RESULT:PASS if there are only warnings or suggestions. Here is the diff:
 
           $DIFF_CONTENT" 2>&1)
           echo "$REVIEW"
@@ -72,3 +71,17 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
           REVIEW_OUTPUT: ${{ steps.review.outputs.review }}
+
+      - name: Fail if critical issues found
+        if: steps.review.outputs.review != ''
+        run: |
+          REVIEW="${{ steps.review.outputs.review }}"
+          if echo "$REVIEW" | grep -qi "RESULT:FAIL"; then
+            echo "❌ Kiro found critical issues. PR cannot be merged until they are resolved."
+            exit 1
+          elif echo "$REVIEW" | grep -qi "critical"; then
+            echo "❌ Kiro found critical issues. PR cannot be merged until they are resolved."
+            exit 1
+          else
+            echo "✅ No critical issues found. PR is safe to merge."
+          fi
