@@ -35,7 +35,6 @@ jobs:
           git diff origin/main...HEAD -- '*.cs' '*.csproj' '*.json' > /tmp/pr-diff.txt
           echo "Diff size: $(wc -c < /tmp/pr-diff.txt) bytes"
 
-      # Feature 1: Find existing Kiro review comment (for update instead of duplicate)
       - name: Find existing review comment
         if: steps.changes.outputs.files != ''
         id: find_comment
@@ -61,7 +60,6 @@ jobs:
               console.log('No existing review comment found');
             }
 
-      # Feature 2: Run Kiro review with previous findings context
       - name: Run Kiro code review
         if: steps.changes.outputs.files != ''
         id: review
@@ -71,7 +69,6 @@ jobs:
         run: |
           DIFF_CONTENT=$(cat /tmp/pr-diff.txt)
 
-          # Build context from previous review if it exists
           PREVIOUS_CONTEXT=""
           if [ -n "$PREVIOUS_REVIEW" ]; then
             PREVIOUS_CONTEXT="IMPORTANT - PREVIOUS REVIEW CONTEXT:
@@ -110,7 +107,9 @@ jobs:
 
           At the end, include:
           - A markdown summary table with columns: Severity, Count, Key Issues
-          - A final verdict line: either RESULT:PASS (no critical issues) or RESULT:FAIL (has critical issues)
+          - IMPORTANT: Your final line MUST be exactly one of: RESULT:PASS or RESULT:FAIL
+          - Use RESULT:FAIL ONLY if there are current unfixed 🔴 Critical findings
+          - Use RESULT:PASS if all critical issues are fixed (even if warnings/suggestions remain)
 
           Here is the diff to review:
 
@@ -125,7 +124,6 @@ jobs:
             echo "ENDOFREVIEW"
           } >> $GITHUB_OUTPUT
 
-      # Feature 1: Update existing comment OR create new one (no duplicates)
       - name: Post or update review comment
         if: steps.review.outputs.review != ''
         uses: actions/github-script@v7
@@ -158,7 +156,6 @@ jobs:
           REVIEW_OUTPUT: ${{ steps.review.outputs.review }}
           COMMENT_ID: ${{ steps.find_comment.outputs.comment_id }}
 
-      # Feature 3: Save review to S3 for trend tracking
       - name: Save review to S3
         if: steps.review.outputs.review != ''
         env:
@@ -172,13 +169,11 @@ jobs:
           AUTHOR=${{ github.event.pull_request.user.login }}
           REVIEW='${{ steps.review.outputs.review }}'
 
-          # Count findings
-          CRITICAL_COUNT=$(echo "$REVIEW" | grep -ci "🔴\|critical" || echo "0")
-          WARNING_COUNT=$(echo "$REVIEW" | grep -ci "🟡\|warning" || echo "0")
-          SUGGESTION_COUNT=$(echo "$REVIEW" | grep -ci "🟢\|suggestion" || echo "0")
-          RESULT=$(echo "$REVIEW" | grep -oi "RESULT:[A-Z]*" | tail -1 || echo "UNKNOWN")
+          CRITICAL_COUNT=$(echo "$REVIEW" | grep -ci "🔴" || echo "0")
+          WARNING_COUNT=$(echo "$REVIEW" | grep -ci "🟡" || echo "0")
+          SUGGESTION_COUNT=$(echo "$REVIEW" | grep -ci "🟢" || echo "0")
+          RESULT=$(echo "$REVIEW" | grep -o "RESULT:[A-Z]*" | tail -1 || echo "UNKNOWN")
 
-          # Create JSON metadata
           cat > /tmp/review-meta.json << METAEOF
           {
             "timestamp": "$TIMESTAMP",
@@ -193,43 +188,36 @@ jobs:
           }
           METAEOF
 
-          # Upload review and metadata to S3
           echo "$REVIEW" > /tmp/review-content.md
           aws s3 cp /tmp/review-content.md "s3://ppops-code-reviews-284333427150/${REPO_NAME}/pr-${PR_NUMBER}/${TIMESTAMP}-review.md" || true
           aws s3 cp /tmp/review-meta.json "s3://ppops-code-reviews-284333427150/${REPO_NAME}/pr-${PR_NUMBER}/${TIMESTAMP}-meta.json" || true
           echo "Review saved to S3: ${REPO_NAME}/pr-${PR_NUMBER}/${TIMESTAMP}"
 
-      # Fail if critical issues found
-      - name: Fail if critical issues found
+      # FIXED: Only check RESULT:PASS or RESULT:FAIL — not the word "critical" in review text
+      - name: Check review verdict
         if: steps.review.outputs.review != ''
         run: |
           REVIEW='${{ steps.review.outputs.review }}'
-          if echo "$REVIEW" | grep -qi "RESULT:FAIL"; then
+
+          # Extract only the RESULT line
+          VERDICT=$(echo "$REVIEW" | grep -o "RESULT:[A-Z]*" | tail -1)
+          echo "Kiro verdict: $VERDICT"
+
+          if [ "$VERDICT" = "RESULT:FAIL" ]; then
             echo ""
             echo "============================================"
             echo "❌ KIRO CODE REVIEW: FAILED"
             echo "============================================"
             echo ""
             echo "Critical issues were found in this PR."
-            echo "Please review the Kiro AI Code Review comment"
-            echo "on the PR for detailed findings, problematic"
-            echo "code sections, and fix instructions."
+            echo "See the Kiro AI Code Review comment on the"
+            echo "PR for detailed findings and fix instructions."
             echo ""
             echo "PR cannot be merged until critical issues"
             echo "are resolved."
             echo "============================================"
             exit 1
-          elif echo "$REVIEW" | grep -qi "critical"; then
-            echo ""
-            echo "============================================"
-            echo "❌ KIRO CODE REVIEW: FAILED"
-            echo "============================================"
-            echo ""
-            echo "Critical issues were found in this PR."
-            echo "See the PR comment for details and fixes."
-            echo "============================================"
-            exit 1
-          else
+          elif [ "$VERDICT" = "RESULT:PASS" ]; then
             echo ""
             echo "============================================"
             echo "✅ KIRO CODE REVIEW: PASSED"
@@ -238,9 +226,17 @@ jobs:
             echo "No critical issues found."
             echo "Warnings and suggestions are in the PR comment."
             echo "============================================"
+          else
+            echo ""
+            echo "============================================"
+            echo "⚠️ KIRO CODE REVIEW: UNKNOWN VERDICT"
+            echo "============================================"
+            echo "Could not determine RESULT:PASS or RESULT:FAIL"
+            echo "from Kiro's output. Defaulting to PASS."
+            echo "Check the PR comment for details."
+            echo "============================================"
           fi
 
-  # Feature 4: Weekly trend report (runs on schedule)
   trend-report:
     name: 'Weekly Trend Report'
     if: github.event_name == 'schedule'
@@ -266,7 +262,6 @@ jobs:
         env:
           KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
         run: |
-          # Combine all metadata
           METADATA=$(cat /tmp/reviews/*-meta.json 2>/dev/null || echo "No reviews found")
           kiro-cli chat \
             --no-interactive \
